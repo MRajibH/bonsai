@@ -1,6 +1,0 @@
-# API keys and local state — never commit
-config.json
-config.tmp
-*.log
-*.pid
-__pycache__/
