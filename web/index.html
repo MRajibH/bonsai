@@ -181,7 +181,7 @@
   .list .li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .hint { font-size: 13px; color: var(--muted); margin-top: 6px; min-height: 18px; }
   .hint.err { color: var(--danger); }
-  body.cloud #think { display: none; }
+  body.no-think #think { display: none; }
   .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
   .tab { border: 1px solid var(--line); border-radius: 999px; padding: 5px 13px; font-size: 13px; }
   .tab:hover { background: var(--hover); }
@@ -479,10 +479,16 @@ async function generate() {
   controller = new AbortController(); setBusy(true);
   let answer = '', thinking = '', tokens = 0, failed = false;
   const t0 = performance.now();
+  const who = parseModel(model) ? (providerOf(parseModel(model).pid)?.name || 'the provider') : 'Bonsai';
+  const waiting = setInterval(() => {      // so a queued or slow model never looks dead
+    if (tokens) return;
+    const s = Math.round((performance.now() - t0) / 1000);
+    stat.textContent = 'Waiting for ' + who + '… ' + s + 's' + (s >= 20 && who !== 'Bonsai' ? ' — this model looks busy or queued on their side; Stop and try another model if it does not start.' : '');
+  }, 1000);
   try {
     const sel = parseModel(model), prov = sel && providerOf(sel.pid);
     const payload = { messages: [SYSTEM, ...chat.messages.map(m => ({ role: m.role, content: m.content }))], stream: true };
-    if (sel) payload.model = sel.id;
+    if (sel) { payload.model = sel.id; payload.think = thinkOn; }
     else Object.assign(payload, { temperature: 0.7, top_p: 0.95, top_k: 20, max_tokens: 2048, chat_template_kwargs: { enable_thinking: thinkOn } });
     el._model = shortName(model);
     const r = await fetch(sel ? '/p/' + sel.pid + '/chat' : '/v1/chat/completions', {
@@ -503,7 +509,8 @@ async function generate() {
       for (const line of lines) {
         if (!line.startsWith('data: ') || line.startsWith('data: [DONE]')) continue;
         let d; try { d = JSON.parse(line.slice(6)).choices?.[0]?.delta || {}; } catch { continue; }
-        if (d.reasoning_content) { thinking += d.reasoning_content; tokens++; think.hidden = false; think.firstChild.textContent = 'Thinking…'; think.lastChild.textContent = thinking; }
+        const rc = d.reasoning_content || d.reasoning;
+        if (rc) { thinking += rc; tokens++; think.hidden = false; think.firstChild.textContent = 'Thinking…'; think.lastChild.textContent = thinking; }
         if (d.content) { answer += d.content; tokens++; body.innerHTML = md(answer); el._text = answer; }
         stat.textContent = (tokens / ((performance.now() - t0) / 1000)).toFixed(1) + ' tokens/s · ' + el._model;
         scrollDown();
@@ -515,9 +522,11 @@ async function generate() {
       body.textContent = err instanceof TypeError ? 'Could not reach Bonsai Chat\'s server. Start it again with the Bonsai Chat launcher.' : String(err.message || err);
     }
   }
+  clearInterval(waiting); if (!tokens) stat.textContent = '';
   body.classList.remove('cursor');
   if (!think.hidden) think.firstChild.textContent = 'Thought process';
-  if (!failed && !answer) body.textContent = thinking ? '(stopped while thinking)' : '(stopped)';
+  if (!failed && !answer) body.textContent = controller.signal.aborted ? (thinking ? '(stopped while thinking)' : '(stopped)')
+    : thinking ? '(The model used its whole reply on thinking and gave no answer. Turn Think off or ask again.)' : '(The model sent an empty reply.)';
   if (answer) { chat.messages.push({ role: 'assistant', content: answer, thinking, stat: stat.textContent }); chat.ts = Date.now(); saveChats(); }
   controller = null; setBusy(false); markLast(); input.focus();
 }
@@ -543,7 +552,7 @@ function renderStatus() {
   $('note').textContent = !prov ? 'Bonsai runs locally on your CPU — replies are private but can be slow.'
     : prov.base_editable ? 'This model runs on your own server at ' + prov.base_url + '.'
     : 'This model runs on ' + prov.name + '\'s servers — your messages are sent over the internet.';
-  document.body.classList.toggle('cloud', !!sel);
+  document.body.classList.toggle('no-think', !!prov && !prov.think_toggle);
 }
 
 /* ---------- models: built-in Bonsai + providers (OpenAI, Gemini, Anthropic, NVIDIA, local LLM) ---------- */

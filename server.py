@@ -48,7 +48,9 @@ PROVIDERS = {
         "name": "NVIDIA", "kind": "openai", "base": "https://integrate.api.nvidia.com/v1", "needs_key": True,
         "desc": "Create a free key at build.nvidia.com (it starts with \"nvapi-\").",
         "key_ph": "nvapi-…", "model_ph": "Model ID, e.g. meta/llama-3.3-70b-instruct",
-        "extra": {"max_tokens": 2048},
+        "extra": {"max_tokens": 4096},
+        # sent when the Think button is off; dropped automatically if a model rejects them
+        "think_off": {"chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "low"},
     },
     "local": {
         "name": "Local LLM", "kind": "openai", "base": "http://localhost:11434/v1", "needs_key": False,
@@ -56,6 +58,7 @@ PROVIDERS = {
         "desc": "Any OpenAI-compatible server on your network. Ollama: http://localhost:11434/v1 · "
                 "LM Studio: http://localhost:1234/v1. The key is optional.",
         "key_ph": "Optional", "model_ph": "Model name, e.g. gemma4:e2b",
+        "think_off": {"chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "low"},
     },
 }
 
@@ -147,6 +150,9 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             conn.close()
             return self.err(503, down_msg)
+        self.pump(conn, resp, translate)
+
+    def pump(self, conn, resp, translate=None):
         try:
             self.start_stream(resp.status, resp.getheader("Content-Type", "application/json"))
             if translate and resp.status == 200:
@@ -263,8 +269,22 @@ class Handler(BaseHTTPRequestHandler):
                 out["system"] = system
             return self.relay(conn, "POST", prefix + "/messages", json.dumps(out).encode(), headers,
                               self.down_msg(p, c), translate=self.anthropic_stream)
-        out = {"model": model, "messages": messages, "stream": True, **p.get("extra", {})}
-        self.relay(conn, "POST", prefix + "/chat/completions", json.dumps(out).encode(), headers, self.down_msg(p, c))
+        conn.close()
+        extras = p.get("think_off", {}) if req.get("think") is False else {}
+        for use in ([extras, {}] if extras else [{}]):
+            out = {"model": model, "messages": messages, "stream": True, **p.get("extra", {}), **use}
+            conn, prefix = connect(c["base_url"])
+            try:
+                conn.request("POST", prefix + "/chat/completions", body=json.dumps(out).encode(), headers=headers)
+                resp = conn.getresponse()
+            except OSError:
+                conn.close()
+                return self.err(503, self.down_msg(p, c))
+            if use and resp.status in (400, 422):   # this model does not accept the thinking options
+                resp.read()
+                conn.close()
+                continue
+            return self.pump(conn, resp)
 
     # ---- settings ------------------------------------------------------
     def settings(self):
@@ -277,6 +297,7 @@ class Handler(BaseHTTPRequestHandler):
                 "id": pid, "name": p["name"], "needs_key": p["needs_key"], "desc": p["desc"],
                 "key_ph": p["key_ph"], "model_ph": p["model_ph"],
                 "base_editable": bool(p.get("base_editable")), "base_url": c["base_url"],
+                "think_toggle": bool(p.get("think_off")),
                 "has_key": bool(key), "key_hint": key[-4:] if len(key) > 8 else "", "models": c["models"],
             })
         self.send_json(200, {"providers": out})

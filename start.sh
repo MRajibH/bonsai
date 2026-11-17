@@ -33,6 +33,8 @@ case "${1:-start}" in
     for f in "$PIDFILE" "$WEBPID"; do
       [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null && stopped=1; rm -f "$f"
     done
+    pkill -f "$HERE/server.py" 2>/dev/null && stopped=1      # in case the pid files went stale
+    pkill -f "llama-server .*--port $LLAMA_PORT" 2>/dev/null && stopped=1
     [ "$stopped" = 1 ] && say "Bonsai stopped." || say "Bonsai is not running."
     exit 0 ;;
   status)
